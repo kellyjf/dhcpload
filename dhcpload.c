@@ -14,7 +14,7 @@
 #include <sys/ioctl.h>
 #include <net/if.h>
 
-
+#include "util.h"
 
 
 void usage(char *progname) {
@@ -51,120 +51,6 @@ struct dhcp_packet {
 	struct dhcp_body     dhcp;
 } __attribute__ ((__packed__));
 
-
-int bind_interface(int sock, char *name) {
-	struct ifreq ifr;
-	int          rc;
-	sll_t        sll, *phw;
-	
-	memset(&ifr, 0, sizeof(ifr));
-	memset(&sll, 0, sizeof(sll));
-
-	strncpy(ifr.ifr_name, name, IFNAMSIZ);
-
-	if((rc=ioctl(sock, SIOCGIFINDEX, &ifr))<0) {
-		perror("SIOCGIFINDEX:");
-		return -1;
-	}
-
-	printf("Index is %d\n", ifr.ifr_ifindex);
-	sll.sll_family = AF_PACKET;	
-	sll.sll_protocol = htons(ETHERTYPE_IP);
-	sll.sll_ifindex  = ifr.ifr_ifindex;
-	sll.sll_halen = ETH_ALEN;
-	phw = (sll_t *)&ifr.ifr_hwaddr;
-	memcpy(&sll.sll_addr, &(phw->sll_addr), ETH_ALEN); 
-
-	if((rc = bind(sock, (sa_t *)&sll, sizeof(sll)))<0) {
-		perror("bind");
-		return -1;
-	}
-
-	return ifr.ifr_ifindex;
-}
-unsigned short csum(unsigned short *ptr,int nbytes) 
-{
-    register long sum;
-    unsigned short oddbyte;
-    register short answer;
- 
-    sum=0;
-    while(nbytes>1) {
-        sum+=*ptr++;
-        nbytes-=2;
-    }
-    if(nbytes==1) {
-        oddbyte=0;
-        *((u_char*)&oddbyte)=*(u_char*)ptr;
-        sum+=oddbyte;
-    }
- 
-    sum = (sum>>16)+(sum & 0xffff);
-    sum = sum + (sum>>16);
-    answer=(short)~sum;
-     
-    return(answer);
-}
-
-unsigned short checksum(unsigned short *ptr, int len)
-{
-    int sum = 0;
-    unsigned short answer = 0;
-    unsigned short *w = ptr;
-    int nleft = len;
- 
-    while(nleft > 1){
-        sum += *w++;
-        nleft -= 2;
-    }
- 
-    sum = (sum >> 16) + (sum & 0xFFFF);
-    sum += (sum >> 16);
-    answer = ~sum;
-    return(answer);
-}
-
-unsigned short udp_sum_calc(unsigned short udp_len, unsigned short *src_addr,unsigned short *dest_addr, unsigned short *buff)
-{
-    unsigned char prot_udp=17;
-    unsigned long sum;
-    int nleft;
-    unsigned short *w;
- 
-    sum = 0;
-    nleft = udp_len;
-    w=buff;
- 
-    while(nleft > 1)
-    {
-        sum += *w++;
-        nleft -= 2;
-    }
- 
-    /* if nleft is 1 there ist still on byte left. We add a padding byte (0xFF) to build a 16bit word */
-    if(nleft>0)
-    {
-    	/* sum += *w&0xFF; */
-             sum += *w&ntohs(0xFF00);   /* Thanks to Dalton */
-    }
- 
-    /* add the pseudo header */
-    sum += src_addr[0];
-    sum += src_addr[1];
-    sum += dest_addr[0];
-    sum += dest_addr[1];
-    sum += htons(udp_len);
-    sum += htons(prot_udp);
- 
-    // keep only the last 16 bits of the 32 bit calculated sum and add the carries
-    sum = (sum >> 16) + (sum & 0xFFFF);
-    sum += (sum >> 16);
- 
-    // Take the one's complement of sum
-    sum = ~sum;
- 
-    return ((unsigned short) sum);
-}
 
 void dump_packet(unsigned char *buf, ssize_t cnt) {
 
@@ -205,6 +91,38 @@ void dump_packet(unsigned char *buf, ssize_t cnt) {
 
 }
 
+
+
+int bind_interface(int sock, char *name) {
+	struct ifreq ifr;
+	int          rc;
+	sll_t        sll, *phw;
+	
+	memset(&ifr, 0, sizeof(ifr));
+	memset(&sll, 0, sizeof(sll));
+
+	strncpy(ifr.ifr_name, name, IFNAMSIZ);
+
+	if((rc=ioctl(sock, SIOCGIFINDEX, &ifr))<0) {
+		perror("SIOCGIFINDEX:");
+		return -1;
+	}
+
+	printf("Index is %d\n", ifr.ifr_ifindex);
+	sll.sll_family = AF_PACKET;	
+	sll.sll_protocol = htons(ETHERTYPE_IP);
+	sll.sll_ifindex  = ifr.ifr_ifindex;
+	sll.sll_halen = ETH_ALEN;
+	phw = (sll_t *)&ifr.ifr_hwaddr;
+	memcpy(&sll.sll_addr, &(phw->sll_addr), ETH_ALEN); 
+
+	if((rc = bind(sock, (sa_t *)&sll, sizeof(sll)))<0) {
+		perror("bind");
+		return -1;
+	}
+
+	return ifr.ifr_ifindex;
+}
 
 int send_packet(int sock, int type) {
 	struct dhcp_packet     *p;
@@ -299,16 +217,20 @@ int main(int argc, char **argv) {
 	sll_t       sll;         
 	ssize_t     rcnt;
 	socklen_t   slen;
+	char       *opt_ifname = "eth0";
 
 	/* options descriptor */
 	static struct option longopts[] = {
 		{ "help",       no_argument,            NULL,           'h' },
-		{ "fluoride",   required_argument,      NULL,           'f' },
+		{ "interface",  required_argument,      NULL,           'i' },
 		{ NULL,         0,                      NULL,           0 }
 	};
 
 	while ((ch = getopt_long(argc, argv, "h", longopts, NULL)) != -1)
 		switch (ch) {
+		case 'i':
+			opt_ifname = optarg;
+			break;
 		case 'h':
 			usage(argv[0]);
 			exit(0);
@@ -326,7 +248,7 @@ int main(int argc, char **argv) {
 		exit(1);
 	}
 
-	if((rc = bind_interface(packet_socket, "eth0"))<0) {
+	if((rc = bind_interface(packet_socket, opt_ifname))<0) {
 		return -1;
 	}
 
