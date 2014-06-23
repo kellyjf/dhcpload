@@ -2,6 +2,8 @@
 #include <stdio.h>    // printf
 #include "list.h"
 
+#ifdef TEST
+
 typedef struct iter_test {
 	int              index;
 	struct list_head running;
@@ -52,3 +54,4 @@ int list_main(int argc, char **argv) {
 	}	
 	return 0;
 }
+#endif
