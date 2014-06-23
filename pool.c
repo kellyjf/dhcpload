@@ -45,6 +45,8 @@ void pool_free(pool_item_t *ret){
 }
 
 
+
+#ifdef TEST
 #include <stdio.h>  // calloc
 void pool_list() {
 	int           i=0;
@@ -85,7 +87,7 @@ void *thread_main(void *user) {
 	return NULL;
 }
 
-int main() {
+int pool_main(int argc, char **argv) {
 	int i;
 	size_t num_thread = 40;
 	pthread_t *p = calloc(num_thread, sizeof(pthread_t) );
@@ -101,3 +103,4 @@ int main() {
 	
 	return 0;
 }	
+#endif
