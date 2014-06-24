@@ -48,6 +48,10 @@ pool_t *pool_new(size_t prealloc, size_t strsize) {
 	return ret;
 }
 
+size_t pool_slabsize(pool_t *pool) {
+	return pool->item_size;
+}
+
 void pool_fini() {
 }
 

@@ -2,6 +2,7 @@
 #define DLNG_QUEUE_H
 
 #include <pthread.h>
+#include <sys/time.h>
 #include "list.h"
 
 typedef struct {
@@ -23,7 +24,7 @@ typedef enum {
 msg_queue_t *msg_queue_new();
 void msg_queue_free(msg_queue_t *);
 
-msg_t *msg_queue_get(msg_queue_t *q);
+msg_t *msg_queue_get(msg_queue_t *q, struct timeval *);
 void   msg_queue_put(msg_queue_t *q, msg_t *);
 msg_error_t msg_queue_send(msg_queue_t *q, void*);
 

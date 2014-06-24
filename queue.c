@@ -1,6 +1,8 @@
+#include <pthread.h> 
 #include <stdlib.h> //calloc
 #include "queue.h"
 #include "pool.h"
+#include "log.h"
 
 pool_t *msg_pool;
 
@@ -33,16 +35,30 @@ void msg_queue_free(msg_queue_t *ret)
 }
 
 
-msg_t *msg_queue_get(msg_queue_t *q)
+msg_t *msg_queue_get(msg_queue_t *q, struct timeval *tv)
 {
 	msg_t  *ret = NULL;
+	int     rc;
 	pthread_mutex_lock(&q->mutex);
-
 	while(list_empty(&q->list)) {
-		pthread_cond_wait(&q->cond, &q->mutex);
+		if(tv) {
+			struct timespec abstime;
+			clock_gettime(CLOCK_REALTIME, &abstime);
+			abstime.tv_sec += tv->tv_sec;
+			abstime.tv_nsec += 1000* tv->tv_usec;
+			if(abstime.tv_nsec>1000000000) {
+				abstime.tv_sec += 1;
+				abstime.tv_nsec %= 1000000000;
+			}
+			rc = pthread_cond_timedwait(&q->cond, &q->mutex, &abstime);
+		} else {
+			rc = pthread_cond_wait(&q->cond, &q->mutex);
+		}
 	}
-	ret=list_first_entry(&q->list, msg_t, list);
-	list_del(&ret->list);
+	if(rc==0) {
+		ret=list_first_entry(&q->list, msg_t, list);
+		list_del(&ret->list);
+	}
 	pthread_mutex_unlock(&q->mutex);
 	return ret;
 }
@@ -79,7 +95,8 @@ void *queue_thread_main(void *user) {
 	msg_t *msg;
 
 	for(i=0; i<1000; i++) {
-		msg = msg_queue_get(the_queue);
+		struct timeval tv = { 1, 0 };
+		msg = msg_queue_get(the_queue, &tv);
 		log_printf("Thread %3d (%4d) gets msg %d\n", *pi,i, *(int *)&msg->data);
 		msg_queue_put(the_queue, msg);
 	}
@@ -90,7 +107,6 @@ void *gen_thread(void *user) {
 	int  i;
 	for(i=0; i<10000; i++) {
 		msg_queue_send(the_queue, (void *)i);
-		pthread_yield();
 	}
 }
 int queue_main(int argc, char **argv) {
