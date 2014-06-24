@@ -44,7 +44,7 @@ void usage(char *progname) {
 	printf("Usage:  %s [options]\n", progname);
 	printf("\t-i|--interface name     Interface                         (using: %s)\n", opt_ifname);
 	printf("\t-m|--max #reqs          Total requests to generate        (using: %d)\n", opt_max);
-	printf("\t-t|--timeout #sec       Restart discovery interval        (using: %d)\n", opt_timeout);
+	printf("\t-t|--timeout #          Num timeouts before quit          (using: %d)\n", opt_timeout);
 	printf("\t-w|--wait  #sec/req     Rate limit # request per interval (using: %d)\n", opt_wait);
 	printf("\t-j|--concurrent num     Number of concurrent requests     (using: %d)\n", opt_concurrent);
 	printf("\t-d|--debug              Turn on debugging\n");
@@ -132,7 +132,7 @@ int bind_interface(int sock, char *name) {
 		return -1;
 	}
 
-	if(opt_debug) printf("Interface %s Index is %d\n", name, ifr.ifr_ifindex);
+	if(opt_debug) log_printf("Interface %s Index is %d\n", name, ifr.ifr_ifindex);
 	sll.sll_family = AF_PACKET;	
 	sll.sll_protocol = htons(ETHERTYPE_IP);
 	sll.sll_ifindex  = ifr.ifr_ifindex;
@@ -232,18 +232,72 @@ ssize_t send_packet(session_t *sess, int type) {
 	return ret;
 }
 
+void report_state(session_t *sess) {
+
+	unsigned         epoch = 0 , svc;
+	char            *sessname = "UNK";
+	struct timeval   tv;
+	
+	if(opt_quiet) return;
+	gettimeofday(&tv, NULL);
+
+	switch(sess->state) { 
+	case SESS_DISCOVER: 
+		sessname="DISCOVER"; 
+		break;
+	case SESS_REQUEST:
+		sessname="REQUEST";
+		break;
+	default:
+		log_printf("STATE IS %d Index %p\n", sess->state, sess);
+		break;
+	}
+	
+	epoch = tv.tv_sec;
+	log_printf("%06d %2d %10.10s %5d %02X:%02X:%02X:%02X:%02X:%02X %d.%d.%d.%d\n", 
+		epoch%1000000,
+		sess->client_mac[5],
+		sessname,
+		0, //svc,
+		sess->client_mac[0],
+		sess->client_mac[1],
+		sess->client_mac[2],
+		sess->client_mac[3],
+		sess->client_mac[4],
+		sess->client_mac[5],
+		(sess->client_ip & 0xff),
+		(sess->client_ip>>8 & 0xff),
+		(sess->client_ip>>16 & 0xff),
+		(sess->client_ip>>24 & 0xff)
+	);
+}	
+
 void *dhcp_client_thread(void *user) {
 	session_t       *session   = user;
 	msg_t           *msg;
 	dhcp_t          *r;
 	struct timeval   delay = { 1, 0 };
+	int              tcnt = 0;
+
+	log_printf("%s started session  %2d @ %p\n", __func__, session->client_mac[5],session);
 
 	while(session->state != SESS_DONE) {
 		msg = msg_queue_get(session->thread_queue, &delay);
+
+		if(opt_debug) {
+			log_printf("msg from %p for %2d: %p\n",
+				session->thread_queue, session->client_mac[5], msg);
+		}
 		
 		if(msg==NULL) {
 			session->state = SESS_START;
 			if(delay.tv_sec < 16) delay.tv_sec *= 2;
+			if(opt_debug) 
+				log_printf("timeout %2d on %d @ %p\n",  
+					tcnt, session->client_mac[5],session);
+			if(tcnt++ > opt_timeout) {
+				session->state = SESS_DONE;
+			}
 			continue;
 		} 
 
@@ -251,6 +305,7 @@ void *dhcp_client_thread(void *user) {
 		case SESS_START:
 			session->state = SESS_DISCOVER;
 			send_packet(session, 1);
+			report_state(session);
 			break;
 		case SESS_DISCOVER:
 			assert(msg);
@@ -261,9 +316,11 @@ void *dhcp_client_thread(void *user) {
 			memcpy(session->server_mac, r->eth.ether_shost, ETH_ALEN);
 			send_packet(session, 3);
 			session->state = SESS_REQUEST;
+			report_state(session);
 			break;
 		case SESS_REQUEST:
 			session->state =  SESS_DONE;
+			report_state(session);
 			break;
 		}
 		if(msg) {
@@ -274,7 +331,7 @@ void *dhcp_client_thread(void *user) {
 
 
 	msg_queue_send(session->manager_queue, session);
-	return NULL;
+	return session;
 }
 
 
@@ -299,6 +356,7 @@ void *dhcp_recv_thread(void *user) {
 	sll_t            sll;
 	socklen_t        slen;
 
+	log_printf("%s started\n", __func__);
 
 	r = (dhcp_t *)pool_alloc(rcv_pool);
 	
@@ -419,19 +477,30 @@ int main(int argc, char **argv) {
 
 	pthread_create(&rcv_thread, NULL, dhcp_recv_thread, NULL);
 
-	for(cnt=0, ndx=0; ndx<opt_max; ndx++) {
+	for(cnt=0, ndx=0; ndx<opt_max; ) {
 		if(cnt<opt_concurrent) {	
 			start_thread(ndx);
 			sleep(opt_wait);
 			cnt++;
+			ndx++;
 		} else  {
 			msg_t     *msg   = msg_queue_get(manager_queue, NULL);
 			session_t *t     = msg->data;
 			void      *status;
-			pthread_join(t->thread, &status);
-			assert(status==t);
 			cnt--;
+			pthread_join(t->thread, &status);
+			log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, (session_t*)status);
+			assert((session_t *)status==t);
 		}
+	}
+	while(cnt>0) {
+		msg_t     *msg   = msg_queue_get(manager_queue, NULL);
+		session_t *t     = msg->data;
+		void      *status;
+		pthread_join(t->thread, &status);
+		assert(status==t);
+		cnt--;
+		log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, status);
 	}
 	close(raw_socket);
 	return 0;

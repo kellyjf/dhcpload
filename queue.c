@@ -6,6 +6,8 @@
 
 pool_t *msg_pool;
 
+int     opt_debug;
+
 msg_queue_t *msg_queue_new() 
 {
 
@@ -38,9 +40,10 @@ void msg_queue_free(msg_queue_t *ret)
 msg_t *msg_queue_get(msg_queue_t *q, struct timeval *tv)
 {
 	msg_t  *ret = NULL;
-	int     rc;
+	int     rc  = 0;
+
 	pthread_mutex_lock(&q->mutex);
-	while(list_empty(&q->list)) {
+	if(list_empty(&q->list)) {
 		if(tv) {
 			struct timespec abstime;
 			clock_gettime(CLOCK_REALTIME, &abstime);
@@ -50,6 +53,7 @@ msg_t *msg_queue_get(msg_queue_t *q, struct timeval *tv)
 				abstime.tv_sec += 1;
 				abstime.tv_nsec %= 1000000000;
 			}
+			if(opt_debug) log_printf(" %p now %10d.%09d\n", q, abstime.tv_sec,abstime.tv_nsec);
 			rc = pthread_cond_timedwait(&q->cond, &q->mutex, &abstime);
 		} else {
 			rc = pthread_cond_wait(&q->cond, &q->mutex);
@@ -58,6 +62,10 @@ msg_t *msg_queue_get(msg_queue_t *q, struct timeval *tv)
 	if(rc==0) {
 		ret=list_first_entry(&q->list, msg_t, list);
 		list_del(&ret->list);
+	} else {
+		struct timespec abstime;
+		clock_gettime(CLOCK_REALTIME, &abstime);
+		if(opt_debug) log_printf(" %p timeout %10d.%09d\n", q, abstime.tv_sec,abstime.tv_nsec);
 	}
 	pthread_mutex_unlock(&q->mutex);
 	return ret;
