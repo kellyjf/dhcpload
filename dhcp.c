@@ -71,7 +71,11 @@ enum {
 	DHCP_OPTION_CLIENT_ID = 0x3d,
 	DHCP_OPTION_END = 0xff,
 };
-	
+
+enum {
+	DHCP_TYPE_DISCOVER = 1,	
+	DHCP_TYPE_REQUEST  = 3,	
+};
 	
 typedef struct sockaddr_ll sll_t;
 typedef struct sockaddr    sa_t;
@@ -295,7 +299,7 @@ void *dhcp_client_thread(void *user) {
 			if(opt_debug) 
 				log_printf("timeout %2d on %d @ %p\n",  
 					tcnt, session->client_mac[5],session);
-			if(tcnt++ > opt_timeout) {
+			if(++tcnt > opt_timeout) {
 				session->state = SESS_DONE;
 			}
 			continue;
@@ -304,17 +308,17 @@ void *dhcp_client_thread(void *user) {
 		switch(session->state) {
 		case SESS_START:
 			session->state = SESS_DISCOVER;
-			send_packet(session, 1);
+			send_packet(session, DHCP_TYPE_DISCOVER);
 			report_state(session);
 			break;
 		case SESS_DISCOVER:
 			assert(msg);
 			r = (dhcp_t *)msg->data;
-			memcpy(&session->client_ip, &r->dhcp.ip_your, 4);
-			memcpy(&session->server_ip, &r->ip.saddr, 4);
+			memcpy(&session->client_ip, &r->dhcp.ip_your, sizeof(session->client_ip));
+			memcpy(&session->server_ip, &r->ip.saddr, sizeof(session->server_ip));
 			memcpy(session->client_mac, r->dhcp.addr, ETH_ALEN);
 			memcpy(session->server_mac, r->eth.ether_shost, ETH_ALEN);
-			send_packet(session, 3);
+			send_packet(session, DHCP_TYPE_REQUEST);
 			session->state = SESS_REQUEST;
 			report_state(session);
 			break;
@@ -480,7 +484,7 @@ int main(int argc, char **argv) {
 	for(cnt=0, ndx=0; ndx<opt_max; ) {
 		if(cnt<opt_concurrent) {	
 			start_thread(ndx);
-			sleep(opt_wait);
+			if(opt_wait) sleep(opt_wait);
 			cnt++;
 			ndx++;
 		} else  {

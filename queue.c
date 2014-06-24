@@ -6,8 +6,6 @@
 
 pool_t *msg_pool;
 
-int     opt_debug;
-
 msg_queue_t *msg_queue_new() 
 {
 
@@ -53,7 +51,6 @@ msg_t *msg_queue_get(msg_queue_t *q, struct timeval *tv)
 				abstime.tv_sec += 1;
 				abstime.tv_nsec %= 1000000000;
 			}
-			if(opt_debug) log_printf(" %p now %10d.%09d\n", q, abstime.tv_sec,abstime.tv_nsec);
 			rc = pthread_cond_timedwait(&q->cond, &q->mutex, &abstime);
 		} else {
 			rc = pthread_cond_wait(&q->cond, &q->mutex);
@@ -62,10 +59,6 @@ msg_t *msg_queue_get(msg_queue_t *q, struct timeval *tv)
 	if(rc==0) {
 		ret=list_first_entry(&q->list, msg_t, list);
 		list_del(&ret->list);
-	} else {
-		struct timespec abstime;
-		clock_gettime(CLOCK_REALTIME, &abstime);
-		if(opt_debug) log_printf(" %p timeout %10d.%09d\n", q, abstime.tv_sec,abstime.tv_nsec);
 	}
 	pthread_mutex_unlock(&q->mutex);
 	return ret;
@@ -83,7 +76,6 @@ msg_error_t msg_queue_send(msg_queue_t *q, void *data)
 
 	msg  = pool_alloc(msg_pool);
 	msg->data = data;
-	//log_printf("Sending %d\n", (int)data);
 	pthread_mutex_lock(&q->mutex);
 	list_add_tail(&msg->list, &q->list);	
 	pthread_cond_signal(&q->cond);
