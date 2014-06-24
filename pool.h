@@ -3,16 +3,12 @@
 
 #include "list.h"
 
-typedef struct {
-	struct list_head  pool;
-} pool_item_t;
+typedef struct pool_s pool_t;
+ 
+pool_t *pool_new(size_t prealloc, size_t structsize);
 
-
-void pool_init(size_t prealloc, size_t structsize);
-void pool_fini();
-
-pool_item_t *pool_alloc();
-void pool_free(pool_item_t *);
+void *pool_alloc(pool_t *);
+void pool_free(pool_t *, void *);
 
 
 

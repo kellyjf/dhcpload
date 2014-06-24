@@ -7,12 +7,16 @@
 
 #include "log.h"
 
+enum {
+	E_LOG_SUCCESS = 0,
+	E_LOG_UNINIT,
+};
 
 int              log_initialized   = 0;
 pthread_mutex_t *log_mutex;
 FILE            *log_fp;
 
-static int log_init() {
+int log_init() {
 	int rc;
 
 	if(log_fp==NULL) log_fp=stdout;
@@ -31,7 +35,7 @@ int log_option_set(log_option_t key, void *value) {
 }
 int log_printf(char *format, ...){
 	va_list ap;
-	if(!log_initialized) log_init();
+	if(!log_initialized) return E_LOG_UNINIT; 
 	va_start(ap, format);
 	pthread_mutex_lock(log_mutex);
 	vfprintf(log_fp, format, ap);
@@ -63,12 +67,14 @@ int log_threaded_main(int argc, char **argv) {
 		}
 	}
 	for(i=0; i<num_thread; i++) {
-		pthread_join(p[i], &res);
+		void *status;
+		pthread_join(p[i],&status);
 	}
 	
 	return 0;
 }	
 int log_main(int argc, char **argv) {
+	log_init();
 	log_threaded_main(argc, argv);
 }
 

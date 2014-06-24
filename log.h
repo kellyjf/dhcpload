@@ -7,7 +7,10 @@ typedef enum {
 	LOG_OPT_MAXNUMFILES,
 } log_option_t;
 
+/* Call log_init() before starting threads */
+int log_init();
 int log_option_set(log_option_t, void *value);
+
 int log_printf(char *, ...);
 
 #endif // DLNG_LOG_H
