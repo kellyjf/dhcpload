@@ -52,12 +52,11 @@ void usage(char *progname) {
 	printf("\t-h|--help               Help (this message)\n");
 }
 
+typedef struct sockaddr_ll sll_t;
+typedef struct sockaddr    sa_t;
+typedef unsigned short     us_t;
 
 typedef enum {
-	SESS_START, SESS_DISCOVER, SESS_REQUEST, SESS_DONE
-} session_state_t;
-
-enum {
 	DHCP_OPTION_SUBNET_MASK = 0x01,
 	DHCP_OPTION_ROUTER = 0x03,
 	DHCP_OPTION_DNS = 0x06,
@@ -70,18 +69,13 @@ enum {
 	DHCP_OPTION_RENEWAL = 0x3a,
 	DHCP_OPTION_CLIENT_ID = 0x3d,
 	DHCP_OPTION_END = 0xff,
-};
+} dhcp_option_t;
 
-enum {
+typedef enum {
 	DHCP_TYPE_DISCOVER = 1,	
 	DHCP_TYPE_REQUEST  = 3,	
-};
+} dhcp_type_t;
 	
-typedef struct sockaddr_ll sll_t;
-typedef struct sockaddr    sa_t;
-typedef unsigned short     us_t;
-
-
 
 struct dhcp_body {
 	unsigned char   bootreq, hwtype, alen, hops;
@@ -104,6 +98,13 @@ struct dhcp_packet {
 } __attribute__ ((__packed__));
 typedef struct dhcp_packet dhcp_t;
 
+typedef enum {
+	SESS_START, 
+	SESS_DISCOVER, 
+	SESS_REQUEST, 
+	SESS_DONE
+} session_state_t;
+
 typedef struct {
 	pthread_t         thread;
 	session_state_t   state;
@@ -114,6 +115,7 @@ typedef struct {
 	unsigned char     server_mac[ETH_ALEN];	
 	unsigned int      client_ip;
 	unsigned int      server_ip;
+	unsigned char     name[16];	
 	union {
 		unsigned char snd_buf[384];
 		dhcp_t        dhcp;
@@ -152,9 +154,8 @@ int bind_interface(int sock, char *name) {
 	return ifr.ifr_ifindex;
 }
 
-ssize_t send_packet(session_t *sess, int type) {
+ssize_t send_packet(session_t *sess, dhcp_type_t type) {
 	dhcp_t                 *p;
-	dhcp_t                 *r;
 	static unsigned short  idnum = 0x66;
 	ssize_t                len;
 	ssize_t                ndx;
@@ -203,18 +204,18 @@ ssize_t send_packet(session_t *sess, int type) {
 		p->dhcp.options[ndx++] = DHCP_OPTION_CLIENT_ID;
 		p->dhcp.options[ndx++] = 0x07;
 		p->dhcp.options[ndx++] = 0x01;
-		memcpy(&p->dhcp.options[ndx], p->eth.ether_dhost, ETH_ALEN);
+		memcpy(&p->dhcp.options[ndx], sess->client_mac, ETH_ALEN);
 		ndx += ETH_ALEN;
 
 		p->dhcp.options[ndx++] = DHCP_OPTION_REQUESTED_IP;
 		p->dhcp.options[ndx++] = 0x04;
-		memcpy(&p->dhcp.options[ndx], &r->dhcp.ip_your, 4);
+		memcpy(&p->dhcp.options[ndx], &sess->client_ip, 4);
 		ndx += 4;
 
 		p->dhcp.options[ndx++] = DHCP_OPTION_HOSTNAME;
-		p->dhcp.options[ndx++] = 12;
-		sprintf(&p->dhcp.options[ndx], "dchpload-%03x", p->eth.ether_shost[5]);
-		ndx += 12;
+		p->dhcp.options[ndx++] = strlen(sess->name);
+		memcpy(&p->dhcp.options[ndx], sess->name, strlen(sess->name));
+		ndx += strlen(sess->name);
 		
 		break;
 	default:
@@ -230,6 +231,7 @@ ssize_t send_packet(session_t *sess, int type) {
 	p->udp.check = (udp_sum_calc(htons(p->udp.len), (us_t *)&p->ip.saddr, (us_t *)&p->ip.daddr, (us_t *)&p->udp));
 
 	pthread_mutex_lock(&socket_mutex);
+	if(opt_debug) log_printf("Writing %d bytes to socket %d\n", len, raw_socket);
 	ret = write(raw_socket, p, len);
 	pthread_mutex_unlock(&socket_mutex);
 
@@ -239,7 +241,8 @@ ssize_t send_packet(session_t *sess, int type) {
 void report_state(session_t *sess) {
 
 	unsigned         epoch = 0 , svc;
-	char            *sessname = "UNK";
+	char            *statename = "UNKNOWN";
+	char            *sessname = "";
 	struct timeval   tv;
 	
 	if(opt_quiet) return;
@@ -247,10 +250,15 @@ void report_state(session_t *sess) {
 
 	switch(sess->state) { 
 	case SESS_DISCOVER: 
-		sessname="DISCOVER"; 
+		statename="DISCOVER"; 
 		break;
 	case SESS_REQUEST:
-		sessname="REQUEST";
+		statename="OFFREQ";
+		sessname = sess->name;
+		break;
+	case SESS_DONE:
+		statename="ACK";
+		sessname = sess->name;
 		break;
 	default:
 		log_printf("STATE IS %d Index %p\n", sess->state, sess);
@@ -258,21 +266,20 @@ void report_state(session_t *sess) {
 	}
 	
 	epoch = tv.tv_sec;
-	log_printf("%06d %2d %10.10s %5d %02X:%02X:%02X:%02X:%02X:%02X %d.%d.%d.%d\n", 
-		epoch%1000000,
-		sess->client_mac[5],
-		sessname,
-		0, //svc,
+	log_printf("%06d.%06d  %02X:%02X:%02X:%02X:%02X:%02X   %-10.10s  %03d.%03d.%03d.%03d  %-12.12s\n", 
+		epoch%1000000, tv.tv_usec,
 		sess->client_mac[0],
 		sess->client_mac[1],
 		sess->client_mac[2],
 		sess->client_mac[3],
 		sess->client_mac[4],
 		sess->client_mac[5],
+		statename,
 		(sess->client_ip & 0xff),
 		(sess->client_ip>>8 & 0xff),
 		(sess->client_ip>>16 & 0xff),
-		(sess->client_ip>>24 & 0xff)
+		(sess->client_ip>>24 & 0xff),
+		sessname
 	);
 }	
 
@@ -283,9 +290,19 @@ void *dhcp_client_thread(void *user) {
 	struct timeval   delay = { 1, 0 };
 	int              tcnt = 0;
 
-	log_printf("%s started session  %2d @ %p\n", __func__, session->client_mac[5],session);
+	if(opt_debug) log_printf("%s started session  %2d @ %p\n", __func__, session->client_mac[5],session);
 
 	while(session->state != SESS_DONE) {
+		if(opt_debug) log_printf("Looping stat %d\n", session->state);
+		switch(session->state) {
+		case SESS_START:
+			session->state = SESS_DISCOVER;
+			send_packet(session, DHCP_TYPE_DISCOVER);
+			report_state(session);
+			break;
+		default:
+			break;
+		}
 		msg = msg_queue_get(session->thread_queue, &delay);
 
 		if(opt_debug) {
@@ -345,6 +362,7 @@ session_t *dhcp_session_for_packet(dhcp_t *packet) {
 
 	pthread_mutex_lock(&session_mutex);
 	list_for_each_entry(sess, &session_list, list) {
+		if(opt_debug) log_printf("%s %08x %08x\n", __func__, sess->client_mac, packet->dhcp.addr) ;
 		if(memcmp(sess->client_mac, packet->dhcp.addr, ETH_ALEN)==0) {
 			break;
 		}
@@ -356,40 +374,43 @@ session_t *dhcp_session_for_packet(dhcp_t *packet) {
 void *dhcp_recv_thread(void *user) {
 	session_t       *session   = user;
 	dhcp_t          *r;
-	ssize_t          rcnt;
+	ssize_t          rcnt = 0;
 	sll_t            sll;
 	socklen_t        slen;
 
-	log_printf("%s started\n", __func__);
+	if(opt_debug) log_printf("%s started\n", __func__);
 
 	r = (dhcp_t *)pool_alloc(rcv_pool);
 	
-	memset(r, 0, pool_slabsize(rcv_pool) ); 
-	memset(&sll, 0, sizeof(sll_t));  slen=sizeof(sll_t);
+	while(rcnt>=0) {
+		memset(r, 0, pool_slabsize(rcv_pool) ); 
+		memset(&sll, 0, sizeof(sll_t));  slen=sizeof(sll_t);
 
-	if((rcnt=recvfrom(raw_socket, r, pool_slabsize(rcv_pool), 0,
-		(sa_t*)&sll, &slen))>0) {
-		
-		
-		if( (memcmp(r->eth.ether_dhost, bcast, ETH_ALEN)==0) 
-			&& (r->ip.protocol==17 )
-			&& ((r->dhcp.id & 0xffff ) == 0xfeca)
-			&& (memcmp(r->dhcp.addr, oui,3)==0)) {
+		if((rcnt=recvfrom(raw_socket, r, pool_slabsize(rcv_pool), 0,
+			(sa_t*)&sll, &slen))>0) {
+			
+			if(opt_debug) log_printf("packet %d recieved\n", rcnt);
+			
+			if( (memcmp(r->eth.ether_dhost, bcast, ETH_ALEN)==0) 
+				&& (r->ip.protocol==17 )
+				&& ((r->dhcp.id & 0xffff ) == 0xfeca)
+				&& (memcmp(r->dhcp.addr, oui,3)==0)) {
 
-			session_t  *sess;
+				session_t  *sess;
 
-			if(sess = dhcp_session_for_packet(r)) {
-				msg_queue_send(sess->thread_queue, r);
-				r = (dhcp_t *)pool_alloc(rcv_pool);
+				if(sess = dhcp_session_for_packet(r)) {
+					if(opt_debug) log_printf("Sending packet to %d\n", sess->client_mac[5]);
+					msg_queue_send(sess->thread_queue, r);
+					r = (dhcp_t *)pool_alloc(rcv_pool);
+				}
+				if(opt_debug) log_printf("packet is %p\n", sess);
 			}
-		}
-		//	dump_packet(rcv_buf, rcnt);
-	} else {
-		perror("recvfrom");
+			//	dump_packet(rcv_buf, rcnt);
+		} else {
+			perror("recvfrom");
+		}	
 	}	
-
-
-
+	return NULL;
 }
 
 void start_thread(int i) {
@@ -401,7 +422,11 @@ void start_thread(int i) {
 		sess->state = SESS_START;
 		sess->thread_queue = msg_queue_new();
 		sess->manager_queue = manager_queue;
+		snprintf(sess->name, sizeof(sess->name), "dhcpload-%03d", i);
 		pthread_create(&sess->thread, NULL, dhcp_client_thread, sess);
+		pthread_mutex_lock(&session_mutex);
+		list_add(&sess->list, &session_list);
+		pthread_mutex_unlock(&session_mutex);
 
 }
 
@@ -493,7 +518,10 @@ int main(int argc, char **argv) {
 			void      *status;
 			cnt--;
 			pthread_join(t->thread, &status);
-			log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, (session_t*)status);
+			pthread_mutex_lock(&session_mutex);
+			list_del(&t->list);
+			pthread_mutex_unlock(&session_mutex);
+			if(opt_debug) log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, (session_t*)status);
 			assert((session_t *)status==t);
 		}
 	}
@@ -502,9 +530,12 @@ int main(int argc, char **argv) {
 		session_t *t     = msg->data;
 		void      *status;
 		pthread_join(t->thread, &status);
+		pthread_mutex_lock(&session_mutex);
+		list_del(&t->list);
+		pthread_mutex_unlock(&session_mutex);
 		assert(status==t);
 		cnt--;
-		log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, status);
+		if(opt_debug) log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, status);
 	}
 	close(raw_socket);
 	return 0;
