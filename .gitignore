@@ -1,6 +1,15 @@
 .deps/
+.*.swp
 Makefile
+Makefile.in
+aclocal.m4
+autom4te.cache/
+compile
 config.log
 config.status
+configure
+*.tar.gz
 dhcpload
+dltest
 *.o
+
