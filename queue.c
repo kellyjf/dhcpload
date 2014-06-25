@@ -104,7 +104,7 @@ void *queue_thread_main(void *user) {
 }
 
 void *gen_thread(void *user) {
-	int  i;
+	long  i;
 	for(i=0; i<10000; i++) {
 		msg_queue_send(the_queue, (void *)i);
 	}

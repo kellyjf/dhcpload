@@ -4,20 +4,20 @@
 
 #ifdef TEST
 
-typedef struct iter_test {
+typedef struct {
 	int              index;
 	struct list_head running;
-};
+} iter_test;
 
 void printlist(struct list_head *head) {
-	struct iter_test *curr;
+	iter_test *curr;
 	list_for_each_entry(curr, head, running) {
 		printf("head %p curr: %p  Index %d\n", head, curr, curr->index);	
 	}
 }
 
 struct list_head *lh_for_index(struct list_head *head, int i) {
-	struct iter_test *curr;
+	iter_test *curr;
 	list_for_each_entry(curr, head, running) {
 		if(curr->index==i) return &curr->running;
 	}
@@ -27,11 +27,11 @@ struct list_head *lh_for_index(struct list_head *head, int i) {
 int list_main(int argc, char **argv) {
 
 	int   i;
-	struct iter_test *curr;
+	iter_test *curr;
 	LIST_HEAD(test_head);
 	
 	for(i=0; i<10; i++) {
-		curr = calloc(1,sizeof(struct iter_test));
+		curr = calloc(1,sizeof(iter_test));
 		curr->index = i;
 		list_add(&curr->running, &test_head);
 	}

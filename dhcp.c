@@ -20,33 +20,46 @@
 #include "util.h"
 #include "log.h"
 
-unsigned int   opt_max        = 1;
-unsigned int   opt_timeout    = 10;
-unsigned int   opt_wait       = 1;
-unsigned int   opt_debug      = 0;
-unsigned int   opt_quiet      = 0;
-unsigned int   opt_concurrent = 5;
-char          *opt_ifname     = "eth0";
 
-unsigned char    bcast [ ETH_ALEN ];
-unsigned char    oui [ ETH_ALEN ];
+struct {
+	unsigned int   opt_max;
+	unsigned int   opt_timeout;
+	unsigned int   opt_wait;
+	unsigned int   opt_debug;
+	unsigned int   opt_quiet;
+	unsigned int   opt_concurrent;
+	char          *opt_ifname;
 
+	unsigned char    bcast [ ETH_ALEN ];
+	unsigned char    oui [ ETH_ALEN ];
+
+	pthread_mutex_t  session_mutex;
+
+	int              raw_socket;
+	pthread_mutex_t  socket_mutex;
+
+	msg_queue_t     *manager_queue;
+	pool_t          *rcv_pool;
+} module = {
+	.opt_max        = 1,
+	.opt_timeout    = 10,
+	.opt_wait       = 1,
+	.opt_debug      = 0,
+	.opt_quiet      = 0,
+	.opt_concurrent = 5,
+	.opt_ifname     = "eth0",
+	.session_mutex  =  PTHREAD_MUTEX_INITIALIZER,
+	.socket_mutex   =  PTHREAD_MUTEX_INITIALIZER,
+};
 LIST_HEAD(session_list);
-pthread_mutex_t  session_mutex  =  PTHREAD_MUTEX_INITIALIZER;
-
-int              raw_socket;
-pthread_mutex_t  socket_mutex   =  PTHREAD_MUTEX_INITIALIZER;
-
-msg_queue_t     *manager_queue;
-pool_t          *rcv_pool;
 
 void usage(char *progname) {
 	printf("Usage:  %s [options]\n", progname);
-	printf("\t-i|--interface name     Interface                         (using: %s)\n", opt_ifname);
-	printf("\t-m|--max #reqs          Total requests to generate        (using: %d)\n", opt_max);
-	printf("\t-t|--timeout #          Num timeouts before quit          (using: %d)\n", opt_timeout);
-	printf("\t-w|--wait  #sec/req     Rate limit # request per interval (using: %d)\n", opt_wait);
-	printf("\t-j|--concurrent num     Number of concurrent requests     (using: %d)\n", opt_concurrent);
+	printf("\t-i|--interface name     Interface                         (using: %s)\n", module.opt_ifname);
+	printf("\t-m|--max #reqs          Total requests to generate        (using: %d)\n", module.opt_max);
+	printf("\t-t|--timeout #          Num timeouts before quit          (using: %d)\n", module.opt_timeout);
+	printf("\t-w|--wait  #sec/req     Rate limit # request per interval (using: %d)\n", module.opt_wait);
+	printf("\t-j|--concurrent num     Number of concurrent requests     (using: %d)\n", module.opt_concurrent);
 	printf("\t-d|--debug              Turn on debugging\n");
 	printf("\t-q|--quiet              Suppress status reporting\n");
 	printf("\t-h|--help               Help (this message)\n");
@@ -138,7 +151,7 @@ int bind_interface(int sock, char *name) {
 		return -1;
 	}
 
-	if(opt_debug) log_printf("Interface %s Index is %d\n", name, ifr.ifr_ifindex);
+	if(module.opt_debug) log_printf("Interface %s Index is %d\n", name, ifr.ifr_ifindex);
 	sll.sll_family = AF_PACKET;	
 	sll.sll_protocol = htons(ETHERTYPE_IP);
 	sll.sll_ifindex  = ifr.ifr_ifindex;
@@ -230,10 +243,10 @@ ssize_t send_packet(session_t *sess, dhcp_type_t type) {
 	p->ip.check = (checksum((unsigned short *)&p->ip, p->ip.ihl*4));
 	p->udp.check = (udp_sum_calc(htons(p->udp.len), (us_t *)&p->ip.saddr, (us_t *)&p->ip.daddr, (us_t *)&p->udp));
 
-	pthread_mutex_lock(&socket_mutex);
-	if(opt_debug) log_printf("Writing %d bytes to socket %d\n", len, raw_socket);
-	ret = write(raw_socket, p, len);
-	pthread_mutex_unlock(&socket_mutex);
+	pthread_mutex_lock(&module.socket_mutex);
+	if(module.opt_debug) log_printf("Writing %d bytes to socket %d\n", len, module.raw_socket);
+	ret = write(module.raw_socket, p, len);
+	pthread_mutex_unlock(&module.socket_mutex);
 
 	return ret;
 }
@@ -245,7 +258,7 @@ void report_state(session_t *sess) {
 	char            *sessname = "";
 	struct timeval   tv;
 	
-	if(opt_quiet) return;
+	if(module.opt_quiet) return;
 	gettimeofday(&tv, NULL);
 
 	switch(sess->state) { 
@@ -290,10 +303,10 @@ void *dhcp_client_thread(void *user) {
 	struct timeval   delay = { 1, 0 };
 	int              tcnt = 0;
 
-	if(opt_debug) log_printf("%s started session  %2d @ %p\n", __func__, session->client_mac[5],session);
+	if(module.opt_debug) log_printf("%s started session  %2d @ %p\n", __func__, session->client_mac[5],session);
 
 	while(session->state != SESS_DONE) {
-		if(opt_debug) log_printf("Looping stat %d\n", session->state);
+		if(module.opt_debug) log_printf("Looping stat %d\n", session->state);
 		switch(session->state) {
 		case SESS_START:
 			session->state = SESS_DISCOVER;
@@ -305,7 +318,7 @@ void *dhcp_client_thread(void *user) {
 		}
 		msg = msg_queue_get(session->thread_queue, &delay);
 
-		if(opt_debug) {
+		if(module.opt_debug) {
 			log_printf("msg from %p for %2d: %p\n",
 				session->thread_queue, session->client_mac[5], msg);
 		}
@@ -313,10 +326,10 @@ void *dhcp_client_thread(void *user) {
 		if(msg==NULL) {
 			session->state = SESS_START;
 			if(delay.tv_sec < 16) delay.tv_sec *= 2;
-			if(opt_debug) 
+			if(module.opt_debug) 
 				log_printf("timeout %2d on %d @ %p\n",  
 					tcnt, session->client_mac[5],session);
-			if(++tcnt > opt_timeout) {
+			if(++tcnt > module.opt_timeout) {
 				session->state = SESS_DONE;
 			}
 			continue;
@@ -345,7 +358,7 @@ void *dhcp_client_thread(void *user) {
 			break;
 		}
 		if(msg) {
-			pool_free(rcv_pool, msg->data);
+			pool_free(module.rcv_pool, msg->data);
 			msg_queue_put(session->thread_queue, msg);
 		}
 	}	
@@ -360,14 +373,14 @@ session_t *dhcp_session_for_packet(dhcp_t *packet) {
 
 	session_t  *sess = NULL;
 
-	pthread_mutex_lock(&session_mutex);
+	pthread_mutex_lock(&module.session_mutex);
 	list_for_each_entry(sess, &session_list, list) {
-		if(opt_debug) log_printf("%s %08x %08x\n", __func__, sess->client_mac, packet->dhcp.addr) ;
+		if(module.opt_debug) log_printf("%s %08x %08x\n", __func__, sess->client_mac, packet->dhcp.addr) ;
 		if(memcmp(sess->client_mac, packet->dhcp.addr, ETH_ALEN)==0) {
 			break;
 		}
 	}	
-	pthread_mutex_unlock(&session_mutex);
+	pthread_mutex_unlock(&module.session_mutex);
 	return sess;
 }
 
@@ -378,32 +391,32 @@ void *dhcp_recv_thread(void *user) {
 	sll_t            sll;
 	socklen_t        slen;
 
-	if(opt_debug) log_printf("%s started\n", __func__);
+	if(module.opt_debug) log_printf("%s started\n", __func__);
 
-	r = (dhcp_t *)pool_alloc(rcv_pool);
+	r = (dhcp_t *)pool_alloc(module.rcv_pool);
 	
 	while(rcnt>=0) {
-		memset(r, 0, pool_slabsize(rcv_pool) ); 
+		memset(r, 0, pool_slabsize(module.rcv_pool) ); 
 		memset(&sll, 0, sizeof(sll_t));  slen=sizeof(sll_t);
 
-		if((rcnt=recvfrom(raw_socket, r, pool_slabsize(rcv_pool), 0,
+		if((rcnt=recvfrom(module.raw_socket, r, pool_slabsize(module.rcv_pool), 0,
 			(sa_t*)&sll, &slen))>0) {
 			
-			if(opt_debug) log_printf("packet %d recieved\n", rcnt);
+			if(module.opt_debug) log_printf("packet %d recieved\n", rcnt);
 			
-			if( (memcmp(r->eth.ether_dhost, bcast, ETH_ALEN)==0) 
+			if( (memcmp(r->eth.ether_dhost, module.bcast, ETH_ALEN)==0) 
 				&& (r->ip.protocol==17 )
 				&& ((r->dhcp.id & 0xffff ) == 0xfeca)
-				&& (memcmp(r->dhcp.addr, oui,3)==0)) {
+				&& (memcmp(r->dhcp.addr, module.oui,3)==0)) {
 
 				session_t  *sess;
 
 				if(sess = dhcp_session_for_packet(r)) {
-					if(opt_debug) log_printf("Sending packet to %d\n", sess->client_mac[5]);
+					if(module.opt_debug) log_printf("Sending packet to %d\n", sess->client_mac[5]);
 					msg_queue_send(sess->thread_queue, r);
-					r = (dhcp_t *)pool_alloc(rcv_pool);
+					r = (dhcp_t *)pool_alloc(module.rcv_pool);
 				}
-				if(opt_debug) log_printf("packet is %p\n", sess);
+				if(module.opt_debug) log_printf("packet is %p\n", sess);
 			}
 			//	dump_packet(rcv_buf, rcnt);
 		} else {
@@ -417,16 +430,16 @@ void start_thread(int i) {
 		session_t  *sess;
 
 		sess = calloc(1, sizeof(*sess));
-		memcpy(sess->client_mac, oui, sizeof(oui));
+		memcpy(sess->client_mac, module.oui, sizeof(module.oui));
 		sess->client_mac[5] = i;
 		sess->state = SESS_START;
 		sess->thread_queue = msg_queue_new();
-		sess->manager_queue = manager_queue;
+		sess->manager_queue = module.manager_queue;
 		snprintf(sess->name, sizeof(sess->name), "dhcpload-%03d", i);
 		pthread_create(&sess->thread, NULL, dhcp_client_thread, sess);
-		pthread_mutex_lock(&session_mutex);
+		pthread_mutex_lock(&module.session_mutex);
 		list_add(&sess->list, &session_list);
-		pthread_mutex_unlock(&session_mutex);
+		pthread_mutex_unlock(&module.session_mutex);
 
 }
 
@@ -454,25 +467,25 @@ int main(int argc, char **argv) {
 	while ((ch = getopt_long(argc, argv, "hdqi:j:m:t:w:", longopts, NULL)) != -1)
 		switch (ch) {
 		case 'q':
-			opt_quiet=1;
+			module.opt_quiet=1;
 			break;
 		case 'd':
-			opt_debug=1;
+			module.opt_debug=1;
 			break;
 		case 'j':
-			opt_concurrent = strtoul(optarg, NULL, 10);
+			module.opt_concurrent = strtoul(optarg, NULL, 10);
 			break;
 		case 't':
-			opt_timeout = strtoul(optarg, NULL, 10);
+			module.opt_timeout = strtoul(optarg, NULL, 10);
 			break;
 		case 'm':
-			opt_max = strtoul(optarg, NULL, 10);
+			module.opt_max = strtoul(optarg, NULL, 10);
 			break;
 		case 'w':
-			opt_wait = strtoul(optarg, NULL, 10);
+			module.opt_wait = strtoul(optarg, NULL, 10);
 			break;
 		case 'i':
-			opt_ifname = optarg;
+			module.opt_ifname = optarg;
 			break;
 		case 'h':
 			usage(argv[0]);
@@ -484,21 +497,21 @@ int main(int argc, char **argv) {
 	argc -= optind;
 	argv += optind;
 
-	memset(bcast, 0xff, sizeof(bcast) ); 
-	memset(oui,   0xcc, sizeof(oui) ); 
+	memset(module.bcast, 0xff, sizeof(module.bcast) ); 
+	memset(module.oui,   0xcc, sizeof(module.oui) ); 
 
 	log_init();
-	rcv_pool = pool_new(8, 2048);	
-	manager_queue  = msg_queue_new();
+	module.rcv_pool = pool_new(8, 2048);	
+	module.manager_queue  = msg_queue_new();
 
-	raw_socket = socket(AF_PACKET, SOCK_RAW, htons(ETHERTYPE_IP));
+	module.raw_socket = socket(AF_PACKET, SOCK_RAW, htons(ETHERTYPE_IP));
 
-	if(raw_socket<0) {
+	if(module.raw_socket<0) {
 		perror("SOCK_RAW requires root permissions");
 		exit(1);
 	}
 
-	if((rc = bind_interface(raw_socket, opt_ifname))<0) {
+	if((rc = bind_interface(module.raw_socket, module.opt_ifname))<0) {
 		return -1;
 	}
 
@@ -506,38 +519,38 @@ int main(int argc, char **argv) {
 
 	pthread_create(&rcv_thread, NULL, dhcp_recv_thread, NULL);
 
-	for(cnt=0, ndx=0; ndx<opt_max; ) {
-		if(cnt<opt_concurrent) {	
+	for(cnt=0, ndx=0; ndx<module.opt_max; ) {
+		if(cnt<module.opt_concurrent) {	
 			start_thread(ndx);
-			if(opt_wait) sleep(opt_wait);
+			if(module.opt_wait) sleep(module.opt_wait);
 			cnt++;
 			ndx++;
 		} else  {
-			msg_t     *msg   = msg_queue_get(manager_queue, NULL);
+			msg_t     *msg   = msg_queue_get(module.manager_queue, NULL);
 			session_t *t     = msg->data;
 			void      *status;
 			cnt--;
 			pthread_join(t->thread, &status);
-			pthread_mutex_lock(&session_mutex);
+			pthread_mutex_lock(&module.session_mutex);
 			list_del(&t->list);
-			pthread_mutex_unlock(&session_mutex);
-			if(opt_debug) log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, (session_t*)status);
+			pthread_mutex_unlock(&module.session_mutex);
+			if(module.opt_debug) log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, (session_t*)status);
 			assert((session_t *)status==t);
 		}
 	}
 	while(cnt>0) {
-		msg_t     *msg   = msg_queue_get(manager_queue, NULL);
+		msg_t     *msg   = msg_queue_get(module.manager_queue, NULL);
 		session_t *t     = msg->data;
 		void      *status;
 		pthread_join(t->thread, &status);
-		pthread_mutex_lock(&session_mutex);
+		pthread_mutex_lock(&module.session_mutex);
 		list_del(&t->list);
-		pthread_mutex_unlock(&session_mutex);
+		pthread_mutex_unlock(&module.session_mutex);
 		assert(status==t);
 		cnt--;
-		if(opt_debug) log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, status);
+		if(module.opt_debug) log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, status);
 	}
-	close(raw_socket);
+	close(module.raw_socket);
 	return 0;
 }
 

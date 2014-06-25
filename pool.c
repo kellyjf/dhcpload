@@ -127,7 +127,7 @@ void *thread_main(void *user) {
 }
 
 int pool_main(int argc, char **argv) {
-	int i;
+	long i;
 	size_t num_thread = 40;
 	pthread_t *p = calloc(num_thread, sizeof(pthread_t) );
 	void *res;
