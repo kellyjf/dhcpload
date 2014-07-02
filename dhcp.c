@@ -443,6 +443,24 @@ void start_thread(int i) {
 
 }
 
+void end_thread(session_t *t) {
+	void      *status;
+	msg_t     *msg;
+
+	pthread_join(t->thread, &status);
+	pthread_mutex_lock(&module.session_mutex);
+	list_del(&t->list);
+	pthread_mutex_unlock(&module.session_mutex);
+	while(!list_empty(&t->thread_queue->list)) {
+		msg = msg_queue_get(t->thread_queue, NULL);
+		pool_free(module.rcv_pool, msg->data);
+		msg_queue_put(t->thread_queue, msg);
+	}
+	msg_queue_free(t->thread_queue);
+	assert(status==t);
+	if(module.opt_debug) log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, status);
+}
+
 #ifndef TEST
 int main(int argc, char **argv) {
 
@@ -523,32 +541,20 @@ int main(int argc, char **argv) {
 		if(cnt<module.opt_concurrent) {	
 			start_thread(ndx);
 			if(module.opt_wait) sleep(module.opt_wait);
-			cnt++;
 			ndx++;
+			cnt++;
 		} else  {
 			msg_t     *msg   = msg_queue_get(module.manager_queue, NULL);
 			session_t *t     = msg->data;
-			void      *status;
+			end_thread(t);
 			cnt--;
-			pthread_join(t->thread, &status);
-			pthread_mutex_lock(&module.session_mutex);
-			list_del(&t->list);
-			pthread_mutex_unlock(&module.session_mutex);
-			if(module.opt_debug) log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, (session_t*)status);
-			assert((session_t *)status==t);
 		}
 	}
 	while(cnt>0) {
 		msg_t     *msg   = msg_queue_get(module.manager_queue, NULL);
 		session_t *t     = msg->data;
-		void      *status;
-		pthread_join(t->thread, &status);
-		pthread_mutex_lock(&module.session_mutex);
-		list_del(&t->list);
-		pthread_mutex_unlock(&module.session_mutex);
-		assert(status==t);
+		end_thread(t);
 		cnt--;
-		if(module.opt_debug) log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, status);
 	}
 	close(module.raw_socket);
 	return 0;
