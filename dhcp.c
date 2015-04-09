@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <signal.h>
 
 #include <getopt.h>
 #include <sys/socket.h>
@@ -22,16 +23,21 @@
 
 
 struct {
+	unsigned int   opt_start;
 	unsigned int   opt_max;
 	unsigned int   opt_timeout;
 	unsigned int   opt_wait;
 	unsigned int   opt_debug;
 	unsigned int   opt_quiet;
+	unsigned int   opt_renew;
+	unsigned int   opt_renewtime;
 	unsigned int   opt_concurrent;
 	char          *opt_ifname;
+	char          *opt_cachefile;
 
 	unsigned char    bcast [ ETH_ALEN ];
 	unsigned char    oui [ ETH_ALEN ];
+	unsigned int     ipcache[256];
 
 	pthread_mutex_t  session_mutex;
 
@@ -41,11 +47,14 @@ struct {
 	msg_queue_t     *manager_queue;
 	pool_t          *rcv_pool;
 } module = {
+	.opt_start      = 0,
 	.opt_max        = 1,
 	.opt_timeout    = 10,
 	.opt_wait       = 1,
 	.opt_debug      = 0,
 	.opt_quiet      = 0,
+	.opt_renew      = 0,
+	.opt_renewtime  = 30,
 	.opt_concurrent = 5,
 	.opt_ifname     = "eth0",
 	.session_mutex  =  PTHREAD_MUTEX_INITIALIZER,
@@ -56,10 +65,14 @@ LIST_HEAD(session_list);
 void usage(char *progname) {
 	printf("Usage:  %s [options]\n", progname);
 	printf("\t-i|--interface name     Interface                         (using: %s)\n", module.opt_ifname);
+	printf("\t-s|--start #val         Starting req number               (using: %d)\n", module.opt_start);
 	printf("\t-m|--max #reqs          Total requests to generate        (using: %d)\n", module.opt_max);
 	printf("\t-t|--timeout #          Num timeouts before quit          (using: %d)\n", module.opt_timeout);
 	printf("\t-w|--wait  #sec/req     Rate limit # request per interval (using: %d)\n", module.opt_wait);
 	printf("\t-j|--concurrent num     Number of concurrent requests     (using: %d)\n", module.opt_concurrent);
+	printf("\t-c|--cachefile file     Name of reuse file\n");
+	printf("\t-r|--renew cnt          Number of times to renew          (using: %d)\n", module.opt_renew);
+	printf("\t-R|--renewtime sec      Seconds between renewals          (using: %d)\n", module.opt_renewtime);
 	printf("\t-d|--debug              Turn on debugging\n");
 	printf("\t-q|--quiet              Suppress status reporting\n");
 	printf("\t-h|--help               Help (this message)\n");
@@ -129,6 +142,7 @@ typedef struct {
 	unsigned int      client_ip;
 	unsigned int      server_ip;
 	unsigned char     name[16];	
+	int               cnt_renew;
 	union {
 		unsigned char snd_buf[384];
 		dhcp_t        dhcp;
@@ -195,7 +209,7 @@ ssize_t send_packet(session_t *sess, dhcp_type_t type) {
 	p->dhcp.bootreq = 1;
 	p->dhcp.hwtype = 1;
 	p->dhcp.alen = ETH_ALEN;
-	p->dhcp.id = 0xFECA + (sess->client_mac[5]<<16) + (type<<24);
+	p->dhcp.id = 0xFECA + (sess->client_mac[5]<<16) + (type<<24) + ((sess->cnt_renew%16)<<28);
 	p->dhcp.flags = 0x0080;
 	memcpy(p->dhcp.addr, p->eth.ether_shost, ETH_ALEN);
 	p->dhcp.cookie = htonl(0x63825363);
@@ -306,11 +320,18 @@ void *dhcp_client_thread(void *user) {
 	if(module.opt_debug) log_printf("%s started session  %2d @ %p\n", __func__, session->client_mac[5],session);
 
 	while(session->state != SESS_DONE) {
-		if(module.opt_debug) log_printf("Looping stat %d\n", session->state);
+		if(module.opt_debug) log_printf("Looping state %d\n", session->state);
 		switch(session->state) {
 		case SESS_START:
-			session->state = SESS_DISCOVER;
-			send_packet(session, DHCP_TYPE_DISCOVER);
+			session->client_ip = module.ipcache[session->client_mac[5]];
+			if(session->client_ip) {
+	if(module.opt_debug) log_printf("%s cache value for  %2d is  %08x\n", __func__, session->client_mac[5],module.ipcache[session->client_mac[5]]);
+				send_packet(session, DHCP_TYPE_REQUEST);
+				session->state = SESS_REQUEST;
+			} else {
+				send_packet(session, DHCP_TYPE_DISCOVER);
+				session->state = SESS_DISCOVER;
+			}
 			report_state(session);
 			break;
 		default:
@@ -350,10 +371,19 @@ void *dhcp_client_thread(void *user) {
 			memcpy(session->server_mac, r->eth.ether_shost, ETH_ALEN);
 			send_packet(session, DHCP_TYPE_REQUEST);
 			session->state = SESS_REQUEST;
+			module.ipcache[session->client_mac[5]] = session->server_ip;
 			report_state(session);
 			break;
 		case SESS_REQUEST:
-			session->state =  SESS_DONE;
+			if(session->cnt_renew-- > 0 ) {
+				session->state =  SESS_DONE;
+				report_state(session);
+				sleep(module.opt_renewtime);
+				session->state =  SESS_REQUEST;
+				send_packet(session, DHCP_TYPE_REQUEST);
+			} else {
+				session->state =  SESS_DONE;
+			}
 			report_state(session);
 			break;
 		}
@@ -435,6 +465,7 @@ void start_thread(int i) {
 		sess->state = SESS_START;
 		sess->thread_queue = msg_queue_new();
 		sess->manager_queue = module.manager_queue;
+		sess->cnt_renew = module.opt_renew;
 		snprintf(sess->name, sizeof(sess->name), "dhcpload-%03d", i);
 		pthread_create(&sess->thread, NULL, dhcp_client_thread, sess);
 		pthread_mutex_lock(&module.session_mutex);
@@ -461,6 +492,36 @@ void end_thread(session_t *t) {
 	if(module.opt_debug) log_printf("join %2d @ %p/%p\n", t->client_mac[5], t, status);
 }
 
+void parsecache(char *cachefile) {
+	unsigned char buffer[256];
+	FILE *fp = fopen(cachefile, "r");
+
+	if(fp==NULL) return;
+	if(module.opt_debug) log_printf("%s parsing cache file %s\n", __func__, cachefile);
+
+	while(fgets(buffer, sizeof(buffer), fp)) {
+		int           rc;
+		unsigned long tsec, tusec;
+		unsigned char octet[2], type[32], ipname[32];
+		unsigned int  ipaddr;
+
+		if(5==(rc=sscanf(buffer, "%lu.%lu CC:CC:CC:CC:CC:%2s %s %s", &tsec, &tusec, octet, type, ipname))) {
+			if(strncmp(type, "ACK", 3)==0) {
+				unsigned char lastoct;
+				unsigned char *cip;
+				lastoct = strtoul(octet, NULL, 16);
+				cip = (unsigned char *)&ipaddr;
+				sscanf(ipname, "%hhu.%hhu.%hhu.%hhu", cip, cip+1, cip+2, cip+3); 
+				module.ipcache[lastoct] = ipaddr;
+	if(module.opt_debug) log_printf("%s cache entry %d -> %08x\n", __func__, lastoct, ipaddr);
+
+			}
+
+		}
+	}
+	fclose(fp);
+}
+
 #ifndef TEST
 int main(int argc, char **argv) {
 
@@ -472,17 +533,21 @@ int main(int argc, char **argv) {
 	/* options descriptor */
 	static struct option longopts[] = {
 		{ "help",       no_argument,            NULL,           'h' },
-		{ "debug",      no_argument,            NULL,           'h' },
+		{ "debug",      no_argument,            NULL,           'd' },
 		{ "quiet",      no_argument,            NULL,           'q' },
 		{ "wait",       required_argument,      NULL,           'w' },
 		{ "max",        required_argument,      NULL,           'm' },
+		{ "start",      required_argument,      NULL,           's' },
 		{ "timeout",    required_argument,      NULL,           't' },
 		{ "concurrent", required_argument,      NULL,           'j' },
+		{ "cachefile",  required_argument,      NULL,           'c' },
+		{ "renew",      required_argument,      NULL,           'r' },
+		{ "renewtime",  required_argument,      NULL,           'R' },
 		{ "interface",  required_argument,      NULL,           'i' },
 		{ NULL,         0,                      NULL,           0 }
 	};
 
-	while ((ch = getopt_long(argc, argv, "hdqi:j:m:t:w:", longopts, NULL)) != -1)
+	while ((ch = getopt_long(argc, argv, "hdqi:j:s:m:t:w:c:r:R:", longopts, NULL)) != -1)
 		switch (ch) {
 		case 'q':
 			module.opt_quiet=1;
@@ -499,11 +564,23 @@ int main(int argc, char **argv) {
 		case 'm':
 			module.opt_max = strtoul(optarg, NULL, 10);
 			break;
+		case 's':
+			module.opt_start = strtoul(optarg, NULL, 10);
+			break;
 		case 'w':
 			module.opt_wait = strtoul(optarg, NULL, 10);
 			break;
+		case 'c':
+			module.opt_cachefile = optarg;
+			break;
 		case 'i':
 			module.opt_ifname = optarg;
+			break;
+		case 'r':
+			module.opt_renew = strtoul(optarg, NULL, 10);
+			break;
+		case 'R':
+			module.opt_renewtime = strtoul(optarg, NULL, 10);
 			break;
 		case 'h':
 			usage(argv[0]);
@@ -522,6 +599,8 @@ int main(int argc, char **argv) {
 	module.rcv_pool = pool_new(8, 2048);	
 	module.manager_queue  = msg_queue_new();
 
+	if(module.opt_cachefile) parsecache(module.opt_cachefile);
+
 	module.raw_socket = socket(AF_PACKET, SOCK_RAW, htons(ETHERTYPE_IP));
 
 	if(module.raw_socket<0) {
@@ -537,7 +616,7 @@ int main(int argc, char **argv) {
 
 	pthread_create(&rcv_thread, NULL, dhcp_recv_thread, NULL);
 
-	for(cnt=0, ndx=0; ndx<module.opt_max; ) {
+	for(cnt=0, ndx=module.opt_start; ndx<module.opt_start+module.opt_max; ) {
 		if(cnt<module.opt_concurrent) {	
 			start_thread(ndx);
 			if(module.opt_wait) sleep(module.opt_wait);
@@ -556,6 +635,7 @@ int main(int argc, char **argv) {
 		end_thread(t);
 		cnt--;
 	}
+	pthread_kill(rcv_thread, 19);
 	close(module.raw_socket);
 	return 0;
 }

@@ -43,6 +43,7 @@ int log_printf(char *format, ...){
 	va_start(ap, format);
 	pthread_mutex_lock(&log_mutex);
 	vfprintf(log_fp?log_fp:stdout, format, ap);
+	if(log_fp) fflush(log_fp);
 	pthread_mutex_unlock(&log_mutex);
 	va_end(ap);
 	return 0;
@@ -71,7 +72,7 @@ void log_rotate() {
 }
 
 int log_file_options(char *nfmt, size_t s, size_t n) {
-	if(nfmt==0) { log_fp = stdout;  return ; }
+	if(nfmt==0) { log_fp = stdout;  return 0; }
 	strncpy(namefmt, nfmt, sizeof(namefmt));
 	if(strchr(namefmt,'%')==NULL) strcat(namefmt, ".%d");
 	maxsize = s;

@@ -2,7 +2,6 @@
 
 bin_PROGRAMS = dhcpload dltest
 
-#old_SOURCES = dhcpload.c util.c util.h
 
 SOURCES = dhcp.c queue.c queue.h list.h pool.c pool.h log.h log.c util.c util.h
 
