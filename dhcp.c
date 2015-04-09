@@ -433,12 +433,23 @@ void *dhcp_recv_thread(void *user) {
 			(sa_t*)&sll, &slen))>0) {
 			
 			if(module.opt_debug) log_printf("packet %d recieved\n", rcnt);
-			
-			if( (memcmp(r->eth.ether_dhost, module.bcast, ETH_ALEN)==0) 
+			 
+			if( 
+				/* If dst mac is broadcast or unicast to one of our ilk */
+				((memcmp(r->eth.ether_dhost, module.bcast, ETH_ALEN)==0) ||
+				(memcmp(r->eth.ether_dhost, module.oui, 3)==0))
+
+				/* And UDP */
 				&& (r->ip.protocol==17 )
+
+				/* And has one of our IDs */
 				&& ((r->dhcp.id & 0xffff ) == 0xfeca)
+
+				/* And has our OUI internally */
 				&& (memcmp(r->dhcp.addr, module.oui,3)==0)) {
 
+
+				/* Then we will act on it */
 				session_t  *sess;
 
 				if(sess = dhcp_session_for_packet(r)) {
@@ -448,7 +459,6 @@ void *dhcp_recv_thread(void *user) {
 				}
 				if(module.opt_debug) log_printf("packet is %p\n", sess);
 			}
-			//	dump_packet(rcv_buf, rcnt);
 		} else {
 			perror("recvfrom");
 		}	
